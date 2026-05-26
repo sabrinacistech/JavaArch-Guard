@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "coverage-summary.schema.json",
+  "description": "Resumen JaCoCo del batch actual — escrito por narrow-test-runner, leído por validation-agent y mutation-agent.",
+  "type": "object",
+  "required": ["schemaVersion", "classes"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "cycle": { "type": "integer" },
+    "runId": { "type": "string" },
+    "lineCoverage": { "type": ["number", "null"] },
+    "branchCoverage": { "type": ["number", "null"] },
+    "instructionCoverage": { "type": ["number", "null"] },
+    "methodCoverage": { "type": ["number", "null"] },
+    "classes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fqcn"],
+        "properties": {
+          "fqcn": { "type": "string" },
+          "lineCoverage": { "type": ["number", "null"] },
+          "branchCoverage": { "type": ["number", "null"] }
+        }
+      }
+    }
+  }
+}

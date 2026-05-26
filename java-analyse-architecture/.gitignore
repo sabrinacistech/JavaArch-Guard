@@ -1,0 +1,19 @@
+# Python bytecode cache — regenerable, no debe versionarse
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Estado generado por el pipeline (artefactos de ejecución, no código fuente)
+state/_patches/
+state/context-packs/
+state/symbol-contracts/
+state/generated-tests.json
+state/compile-error-index.json
+state/execution-state.json
+state/failure-memory.json
+
+# Entornos virtuales locales
+.venv/
+venv/
+env/

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fixture-catalog.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "fixtures"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "strategy"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "strategy": { "enum": ["builder", "constructor", "factory", "mock"] },
+          "builderEvidence": { "type": "string" },
+          "constructorEvidence": { "type": "string" },
+          "factoryEvidence": { "type": "string" },
+          "values": { "type": "object" },
+          "variants": { "type": "array", "items": { "type": "string" } },
+          "cycleSafe": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

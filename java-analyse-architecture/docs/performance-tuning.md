@@ -1,0 +1,127 @@
+# Performance Tuning
+
+Reporte de un caso real: **30 minutos para 3 tests, uno con imports irresolutos**.
+
+Esto pasa cuando los pasos deterministas se ejecutan dentro del LLM (parseo de POM, cálculo de classpath, lectura de javap, etc.) o cuando cada ciclo recompila Maven desde cero. Esta guía elimina ambos.
+
+## Diagnóstico del caso
+
+| Síntoma | Causa raíz |
+|---------|-----------|
+| 30 min totales | Cada ciclo de generación corre `mvn clean test` y el LLM relee POMs/contratos. |
+| 1 test con imports rotos | El símbolo se "infirió" en lugar de citarse desde el contrato. La whitelist no estaba precomputada o el agente no la consultó. |
+| Solo 3 tests | El planificador no usa batches y los agentes serializan trabajo que podría ir en paralelo. |
+
+## Plan de optimización
+
+### 1. Pre-stage en Python obligatorio
+Antes de cualquier ciclo de generación:
+
+```bash
+mvn -q -DskipTests package
+python tools/python/run_pipeline.py \
+   --repo . \
+   --out docs/agents/java-test-coverage-architecture/state \
+   --module <module-name> \
+   --include-fqcn '^com\.acme\.' \
+   --jacoco-xml target/site/jacoco/jacoco.xml \
+   --coverage-mode coverage
+```
+
+Esto produce `build-tool-contract.json`, `archetype-profile.json`, `generated-code-index.json`, `import-whitelist.json`, `symbol-contracts/<fqcn>.json` y, si hay JaCoCo, `coverage-targets.json`. El LLM solo lee estos.
+
+### 2. Nada de `mvn clean` entre ciclos
+- Mantener `target/`.
+- Ejecutar `mvn -o -pl <module> -Dtest=A,B,C test` (offline + selección puntual de tests).
+- `clean` solo si se cambian dependencias.
+
+### 3. Batches reales
+Tamaños por tipo de SUT (ver `skills/06-planning/batch-planning.md`):
+
+| Tipo | Batch máx. |
+|------|------------|
+| POJO / DTO | 8 |
+| Mapper / Validator | 5 |
+| Controller / Service | 3 |
+| Adapter externo / WebClient / SOAP | 1–2 |
+| Resilient (retry, circuit-breaker) | 1 |
+| Consumer de tipo generado | 1–2 |
+
+Un único `mvn test` por batch, no por test.
+
+### 4. Lint Python antes de compilar
+Cualquier test propuesto pasa primero por `test_linter.py`. Si rompe G1, jamás llega a `javac`. Esto evita el ciclo `compilar → fallar → reparar → recompilar` (3+ minutos cada uno).
+
+### 5. Contratos solo de lo necesario
+- `bytecode_scanner.py --include '^com\.acme\.modulo\.'` limita el barrido al package del módulo.
+- Para el batch actual, el agente proyecta una vista **mínima** del contrato (solo métodos referenciados) en `state/symbol-contracts/_views/<batchId>.json`. No incrustar el contrato completo en el prompt.
+
+### 6. Paralelizar contratos
+`bytecode_scanner.py` ya es por-clase. Para muchos módulos:
+```bash
+ls modules/ | xargs -P 4 -I{} python tools/python/bytecode_scanner.py --repo . --module {} --out state
+```
+
+### 7. Caché agresiva
+- `state/_cache/` por defecto activo.
+- No invalidar si `pom.xml` y `target/classes/**/*.class` no cambiaron.
+
+### 8. Mensajes a los agentes (presupuesto)
+- El prompt de `generation-agent` debe entregar **solo**:
+  - 1 SUT a la vez (o batch homogéneo)
+  - vista mínima de su contrato (`_views/<batchId>.json`)
+  - subset relevante de la whitelist (imports candidatos)
+  - reglas del arquetipo (`archetype-profile.json#implies`)
+- No incluir el POM, el changelog completo, ni el classpath crudo.
+
+### 9. Modo offline para repair
+Tras compilar, `compile_error_parser.py` genera `compile-error-index.json`. El `repair-agent` lee solo ese JSON; no relee Surefire reports XML completos.
+
+### 10. Convergencia explícita
+Cortar el loop si:
+- Dos ciclos consecutivos con delta=0 de cobertura.
+- `compileFailRate > 0.5` en un ciclo.
+- Mensaje claro al usuario, no seguir gastando tokens "por las dudas".
+
+## KPIs después de la optimización (referencia)
+
+| Métrica | Antes | Esperado |
+|---------|-------|---------|
+| Tokens promedio por test generado | 25k–50k | 4k–8k |
+| Tiempo por test (batch chico) | 10 min | 30–90 s |
+| Tests por ciclo | 1–3 | 5–15 (POJO) / 3–5 (Service) |
+| Tasa de imports irresolutos | >20% | <2% (G1 bloquea antes) |
+
+## Anti-patrones a evitar
+
+- Llamar a `mvn clean` entre tests del mismo ciclo.
+- Pegar `pom.xml` completo en el prompt.
+- Pegar `javap` crudo o jars de classpath en el prompt.
+- Pedir al LLM que "deduzca" si un import existe en el classpath.
+- Generar tests sin pasar por `test_linter.py` primero.
+- Ejecutar JaCoCo full-report tras cada test individual; consolidar por batch.
+- Reescribir contratos en cada ciclo en vez de cachear por SHA.
+
+## Optimization Roadmap — Phases 1-8
+
+Las optimizaciones anteriores son la base. El roadmap incremental añade:
+
+- **Phase 1 — Semantic Index** (`state/index/`): elimina el reparseo cruzado entre agentes. Ver `docs/semantic-index-architecture.md`.
+- **Phase 2 — Determinismo vs LLM**: política estricta sobre qué se computa y qué se prompea. Ver `skills/00-runtime/deterministic-analysis-policy.md`.
+- **Phase 3 — Ejecución incremental**: `state/incremental-map.json` propaga `changedFiles → affectedClasses → affectedTests`. Ver `skills/00-runtime/incremental-execution.md`.
+- **Phase 4 — Generación quirúrgica (AST patches)**: emitir parches mínimos, no archivos completos. Ver `skills/07-generation/ast-patch-generation.md`.
+- **Phase 5 — Plantillas determinísticas**: `templates/*.java` reducen alucinación. El LLM completa cuerpos/asserts, no esqueletos.
+- **Phase 6 — Repair determinístico**: `repair-rules/*.rules` resuelven antes de llamar al LLM.
+- **Phase 7 — Consolidación**: `agents/repository-intelligence-agent.md` absorbe discovery/classification/dep-graph/symbol-contract/stack-profile.
+- **Phase 8 — LSP**: reutilizar JDT.LS de VS Code en vez de re-resolver símbolos. Ver `skills/00-runtime/lsp-integration.md`.
+
+### KPIs adicionales esperados tras phases 1-8
+
+| Métrica                                | Tras 10 ítems anteriores | Tras Phases 1-8 |
+|----------------------------------------|--------------------------|-----------------|
+| Tokens por test (Service)              | 4k-8k                    | 1.5k-3k         |
+| Reparseos de `.java` por ciclo         | O(agentes × archivos)    | 0 (índice)      |
+| `mvn` por edición de un archivo (VS)   | full module              | `-Dtest=<one>`  |
+| Tamaño prompt repair (típico)          | 1.5k-3k                  | 0.3k-0.8k       |
+| Latencia generación de 1 test (warm)   | 30-90s                   | 5-15s           |
+
