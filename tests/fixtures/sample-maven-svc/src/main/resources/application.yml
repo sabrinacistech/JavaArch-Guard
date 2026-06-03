@@ -1,0 +1,42 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:postgresql://order-db:5432/orders
+    username: orders
+    password: ${DB_PASSWORD}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+feign:
+  client:
+    config:
+      default:
+        connectTimeout: 1000
+        readTimeout: 3000
+      payments:
+        connectTimeout: 2000
+        readTimeout: 5000
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      payments:
+        slidingWindowSize: 20
+        failureRateThreshold: 50
+
+logging:
+  level:
+    root: INFO
+    com.example.order: DEBUG
